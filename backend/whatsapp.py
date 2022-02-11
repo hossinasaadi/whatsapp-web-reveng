@@ -31,7 +31,7 @@ import pyqrcode;
 from utilities import *;
 from whatsapp_binary_reader import whatsappReadBinary;
 
-WHATSAPP_WEB_VERSION="2,2121,6"
+WHATSAPP_WEB_VERSION="2,2136,10"
 
 reload(sys);
 sys.setdefaultencoding("utf-8");
@@ -181,6 +181,23 @@ class WhatsAppWebClient:
                         try:
                             processedData = whatsappReadBinary(decryptedMessage, True);
                             messageType = "binary";
+
+                            # sort contacts obj{jid : name}
+                            try:
+                                if processedData[1]['type'] is "contacts":
+                                    messageType = "jsonContacts";
+                                    processedData.append(self.sortedContacts(processedData)) 
+                            except:
+                                pass
+                            
+                            # sort statuses
+                            try:
+                                if processedData[2][0][0] is "status":
+                                    processedData[2] = self.sortedStatuses(processedData)
+                                    messageType = "jsonStatuses";
+                            except:
+                                pass
+
                         except:
                             processedData = { "traceback": traceback.format_exc().splitlines() };
                             messageType = "error";
@@ -191,6 +208,7 @@ class WhatsAppWebClient:
                     if isinstance(jsonObj, list) and len(jsonObj) > 0:					# check if the result is an array
                         eprint(json.dumps(jsonObj));
                         if jsonObj[0] == "Conn":
+                            self.getStatuses(); # request for contacts statuses
                             Timer(20.0, self.keepAlive).start() # Keepalive Request
                             self.connInfo["clientToken"] = jsonObj[1]["clientToken"];
                             self.connInfo["serverToken"] = jsonObj[1]["serverToken"];
@@ -209,7 +227,7 @@ class WhatsAppWebClient:
                             self.loginInfo["key"]["encKey"] = keysDecrypted[:32];
                             self.loginInfo["key"]["macKey"] = keysDecrypted[32:64];
                             
-                            self.save_session();
+                            self.saveSession();
                             # eprint("private key            : ", base64.b64encode(self.loginInfo["privateKey"].serialize()));
                             # eprint("secret                 : ", base64.b64encode(self.connInfo["secret"]));
                             # eprint("shared secret          : ", base64.b64encode(self.connInfo["sharedSecret"]));
@@ -276,13 +294,48 @@ class WhatsAppWebClient:
             "serverToken"] + '", "' + self.loginInfo["clientId"] + '", "takeover"]'
 
         self.activeWs.send(message)
-    def save_session(self):
+    def saveSession(self):
         session = {"clientToken":self.connInfo["clientToken"],"serverToken":self.connInfo["serverToken"],
         "clientId":self.loginInfo["clientId"],"macKey": self.loginInfo["key"]["macKey"].decode("latin_1")
         ,"encKey": self.loginInfo["key"]["encKey"].decode("latin_1")};
         f = open("./session.json","w")
         f.write(json.dumps(session))
         f.close()
+    
+    def sortedContacts(self,processedData):
+        contacts = {} 
+        for contact in range(len(processedData[2])):
+            if 'name' in processedData[2][contact][1].keys() :
+                contacts[processedData[2][contact][1]['jid']] = processedData[2][contact][1]['name']
+        return contacts
+
+    def getStatuses(self):
+        messageId = "3EB0"+binascii.hexlify(Random.get_random_bytes(8)).upper()
+        encryptedMessage = WhatsAppEncrypt(
+            self.loginInfo["key"]["encKey"],
+            self.loginInfo["key"]["macKey"],
+            whatsappWriteBinary(["query", {"type": "status","jid":""}, None])
+        )
+        payload = bytearray(messageId) + bytearray(",") + bytearray(
+            to_bytes(WAMetrics.QUERY_MEDIA, 1)
+        ) + bytearray([0x80]) + encryptedMessage
+        self.activeWs.send(payload, websocket.ABNF.OPCODE_BINARY)
+
+    def sortedStatuses(self,processedData):
+        entries = {}
+        bad = []
+        for user in range(len(processedData[2])):
+            jid = processedData[2][user][1]['jid']
+            for story in range(len(processedData[2][user][2])):
+                if processedData[2][user][2][story][0] == "picture" :
+                    bad.append(story)
+                    continue 
+                decoded_msgs = WAWebMessageInfo.decode(processedData[2][user][2][story][2])
+                processedData[2][user][2][story] = decoded_msgs['message']
+            entries[jid] = processedData[2][user][2]
+            for b in bad:
+                del entries[jid][b]
+        return entries
 
     def getLoginInfo(self, callback):
         callback["func"]({ "type": "login_info", "data": self.loginInfo }, callback);
